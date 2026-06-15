@@ -82,6 +82,11 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Root route for Render health checks
+app.get('/', (req, res) => {
+  res.status(200).send('EVO Backend is running');
+});
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: `Route ${req.method} ${req.path} not found` });
