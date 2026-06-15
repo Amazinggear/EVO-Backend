@@ -112,7 +112,7 @@ const startServer = async () => {
     setIo(io);
 
     const PORT = process.env.PORT || 5000;
-    server.listen(PORT, () => {
+    server.listen(PORT, '0.0.0.0', () => {
       logger.info(`🚀 EVO Backend running on port ${PORT}`);
       logger.info(`📡 WebSocket server ready`);
       logger.info(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
