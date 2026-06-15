@@ -1,0 +1,168 @@
+const { query } = require('../config/database');
+const { verifyFirebaseToken } = require('../config/firebase');
+const { generateTokens } = require('../middleware/auth');
+const logger = require('../utils/logger');
+
+/**
+ * POST /api/v1/auth/verify-otp
+ * Body: { firebaseIdToken, fullName? }
+ * - Verifies Firebase phone auth token
+ * - Creates new user (passenger) or logs in existing user
+ * - Returns JWT access + refresh tokens
+ */
+const verifyOtp = async (req, res) => {
+  try {
+    const { firebaseIdToken, fullName, onesignalPlayerId, preferredLanguage } = req.body;
+
+    if (!firebaseIdToken) {
+      return res.status(400).json({ error: 'firebaseIdToken is required' });
+    }
+
+    // Verify with Firebase Admin SDK
+    const decodedToken = await verifyFirebaseToken(firebaseIdToken);
+    const { uid: firebaseUid, phone_number: phone } = decodedToken;
+
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number not found in token' });
+    }
+
+    // Normalize phone: ensure +962 format
+    const normalizedPhone = phone.startsWith('+') ? phone : `+${phone}`;
+
+    // Check if user exists
+    const { rows: existingUsers } = await query(
+      'SELECT * FROM users WHERE phone = $1 OR firebase_uid = $2',
+      [normalizedPhone, firebaseUid]
+    );
+
+    let user = existingUsers[0];
+    let isNewUser = false;
+
+    if (!user) {
+      // New user — create account
+      if (!fullName) {
+        return res.status(422).json({
+          error: 'Full name required for new registration',
+          code: 'NEW_USER_NEEDS_NAME',
+        });
+      }
+
+      const { rows } = await query(
+        `INSERT INTO users (phone, full_name, firebase_uid, role, status, onesignal_player_id, preferred_language)
+         VALUES ($1, $2, $3, 'passenger', 'active', $4, $5)
+         RETURNING id, phone, full_name, role, status, preferred_language`,
+        [normalizedPhone, fullName.trim(), firebaseUid, onesignalPlayerId || null, preferredLanguage || 'ar']
+      );
+
+      user = rows[0];
+      isNewUser = true;
+      logger.info(`👤 New passenger registered: ${normalizedPhone}`);
+    } else {
+      // Existing user — update OneSignal player ID if changed
+      if (onesignalPlayerId && user.onesignal_player_id !== onesignalPlayerId) {
+        await query(
+          'UPDATE users SET onesignal_player_id = $1, updated_at = NOW() WHERE id = $2',
+          [onesignalPlayerId, user.id]
+        );
+      }
+    }
+
+    // Check account status
+    if (user.status === 'suspended') {
+      return res.status(403).json({ error: 'Account suspended', code: 'ACCOUNT_SUSPENDED' });
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user.id, user.role);
+
+    return res.status(200).json({
+      success: true,
+      isNewUser,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        fullName: user.full_name,
+        role: user.role,
+        status: user.status,
+        preferredLanguage: user.preferred_language,
+      },
+      tokens: { accessToken, refreshToken },
+    });
+  } catch (error) {
+    logger.error('verifyOtp error:', error.message);
+    if (error.code === 'auth/id-token-expired') {
+      return res.status(401).json({ error: 'OTP expired, please try again' });
+    }
+    return res.status(500).json({ error: 'Authentication failed' });
+  }
+};
+
+/**
+ * POST /api/v1/auth/refresh-token
+ */
+const refreshToken = async (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const { refreshToken: token } = req.body;
+    if (!token) return res.status(400).json({ error: 'Refresh token required' });
+
+    const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
+    const { rows } = await query(
+      'SELECT id, role, status FROM users WHERE id = $1',
+      [decoded.userId]
+    );
+
+    if (!rows[0] || rows[0].status === 'suspended') {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    const tokens = generateTokens(rows[0].id, rows[0].role);
+    return res.json({ tokens });
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
+  }
+};
+
+/**
+ * PATCH /api/v1/auth/profile
+ * Update user's name, email, language, or avatar
+ */
+const updateProfile = async (req, res) => {
+  try {
+    const { fullName, email, preferredLanguage, onesignalPlayerId } = req.body;
+    const userId = req.user.id;
+
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (fullName) { updates.push(`full_name = $${paramCount++}`); values.push(fullName.trim()); }
+    if (email !== undefined) { updates.push(`email = $${paramCount++}`); values.push(email || null); }
+    if (preferredLanguage && ['ar', 'en'].includes(preferredLanguage)) {
+      updates.push(`preferred_language = $${paramCount++}`);
+      values.push(preferredLanguage);
+    }
+    if (onesignalPlayerId) {
+      updates.push(`onesignal_player_id = $${paramCount++}`);
+      values.push(onesignalPlayerId);
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    updates.push('updated_at = NOW()');
+    values.push(userId);
+
+    const { rows } = await query(
+      `UPDATE users SET ${updates.join(', ')} WHERE id = $${paramCount} RETURNING id, phone, full_name, email, role, preferred_language`,
+      values
+    );
+
+    return res.json({ success: true, user: rows[0] });
+  } catch (err) {
+    logger.error('updateProfile error:', err.message);
+    return res.status(500).json({ error: 'Failed to update profile' });
+  }
+};
+
+module.exports = { verifyOtp, refreshToken, updateProfile };

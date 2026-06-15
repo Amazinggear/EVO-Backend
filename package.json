@@ -1,0 +1,44 @@
+{
+  "name": "evo-backend",
+  "version": "1.0.0",
+  "description": "EVO Electric Vehicle Ride-Hailing Backend — Node.js + Socket.io + PostgreSQL",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "migrate": "node src/database/migrate.js",
+    "test": "jest --runInBand",
+    "lint": "eslint src/**/*.js"
+  },
+  "keywords": [
+    "ride-hailing",
+    "electric-vehicle",
+    "jordan",
+    "evo"
+  ],
+  "author": "EVO Team",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "eslint": "^10.4.1",
+    "jest": "^30.4.2",
+    "nodemon": "^3.1.14"
+  },
+  "dependencies": {
+    "@onesignal/node-onesignal": "^5.8.0",
+    "axios": "^1.17.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
+    "firebase-admin": "^14.0.0",
+    "helmet": "^8.2.0",
+    "ioredis": "^5.11.1",
+    "jsonwebtoken": "^9.0.3",
+    "pg": "^8.21.0",
+    "socket.io": "^4.8.3",
+    "winston": "^3.19.0"
+  }
+}
