@@ -38,7 +38,7 @@ const listUsers = async (req, res) => {
 
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const { rows } = await query(
-      `SELECT id, phone, full_name, email, role, status, preferred_language, created_at
+      `SELECT id, phone, full_name, email, role, admin_role, status, preferred_language, passenger_rating, cancellation_count, last_login_at, created_at
        FROM users ${where} ORDER BY created_at DESC LIMIT $${i++} OFFSET $${i}`,
       [...values, limit, offset]
     );
@@ -107,7 +107,7 @@ const getLiveRides = async (req, res) => {
       SELECT r.id, r.status, r.car_type, r.pickup_lat, r.pickup_lng, r.dropoff_lat, r.dropoff_lng,
              r.pickup_address, r.dropoff_address, r.total_fare,
              pu.full_name as passenger_name, pu.phone as passenger_phone,
-             du.full_name as driver_name, du.phone as driver_phone,
+             r.driver_id, du.full_name as driver_name, du.phone as driver_phone,
              dp.current_lat as driver_lat, dp.current_lng as driver_lng,
              dp.car_model, dp.car_plate, r.accepted_at
       FROM rides r
@@ -119,20 +119,58 @@ const getLiveRides = async (req, res) => {
     `);
 
     // Enrich with Redis (live location)
-    const enriched = await Promise.all(rows.map(async (ride) => {
+    const enrichedRides = await Promise.all(rows.map(async (ride) => {
       if (ride.driver_id) {
         const liveLoc = await getDriverLocation(ride.driver_id).catch(() => null);
         if (liveLoc) {
-          ride.driver_lat = liveLoc.lat;
-          ride.driver_lng = liveLoc.lng;
-          ride.driver_heading = liveLoc.heading;
+          ride.driver_lat = parseFloat(liveLoc.lat);
+          ride.driver_lng = parseFloat(liveLoc.lng);
+          ride.driver_heading = parseFloat(liveLoc.heading) || 0;
         }
       }
       return ride;
     }));
 
-    return res.json({ rides: enriched, count: enriched.length });
+    // Get all online drivers from Redis
+    const onlineDriverIds = await getOnlineDrivers();
+    const onlineDrivers = [];
+
+    if (onlineDriverIds.length > 0) {
+      const placeholders = onlineDriverIds.map((_, idx) => `$${idx + 1}`).join(',');
+      const { rows: profiles } = await query(
+        `SELECT dp.user_id as id, dp.car_type, dp.car_model, dp.car_plate, dp.rating, dp.wallet_balance, dp.total_rides,
+                u.full_name as name, u.phone
+         FROM driver_profiles dp
+         JOIN users u ON u.id = dp.user_id
+         WHERE dp.user_id IN (${placeholders})`,
+        onlineDriverIds
+      );
+
+      for (const p of profiles) {
+        const loc = await getDriverLocation(p.id).catch(() => null);
+        const activeRide = enrichedRides.find(r => r.driver_id === p.id);
+
+        onlineDrivers.push({
+          id: p.id,
+          name: p.name,
+          phone: p.phone,
+          carType: p.car_type,
+          carPlate: p.car_plate,
+          lat: loc ? parseFloat(loc.lat) : 31.9539,
+          lng: loc ? parseFloat(loc.lng) : 35.9106,
+          heading: loc ? parseFloat(loc.heading) || 0 : 0,
+          speed: loc ? parseFloat(loc.speed) || 0 : 0,
+          status: activeRide ? (activeRide.status === 'in_progress' ? 'in_ride' : 'arriving') : 'online',
+          walletBalance: parseFloat(p.wallet_balance) || 0,
+          rideId: activeRide ? activeRide.id : undefined,
+          lastSeen: 'نشط الآن',
+        });
+      }
+    }
+
+    return res.json({ rides: enrichedRides, drivers: onlineDrivers, count: enrichedRides.length });
   } catch (err) {
+    logger.error('getLiveRides error:', err.message);
     return res.status(500).json({ error: 'Failed to fetch live rides' });
   }
 };
@@ -285,5 +323,6 @@ module.exports = {
   listPromoCodes: require('./promoController').listPromoCodes,
   createPromoCode: require('./promoController').createPromoCode,
   updatePromoCode: require('./promoController').updatePromoCode,
+  deletePromoCode: require('./promoController').deletePromoCode,
   getFinancialSummary, getAllTransactions, processPayouts, getAuditLogs,
 };

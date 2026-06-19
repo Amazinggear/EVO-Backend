@@ -18,7 +18,7 @@ const authenticate = async (req, res, next) => {
 
     // Fetch fresh user from DB on each request (catches suspended accounts)
     const { rows } = await query(
-      'SELECT id, phone, full_name, role, status, onesignal_player_id, preferred_language FROM users WHERE id = $1',
+      'SELECT id, phone, full_name, email, avatar_url, role, admin_role, status, onesignal_player_id, preferred_language FROM users WHERE id = $1',
       [decoded.userId]
     );
 
@@ -44,10 +44,11 @@ const authenticate = async (req, res, next) => {
 };
 
 /**
- * Middleware: require specific role
+ * Middleware: require specific role or admin_role
  */
 const requireRole = (...roles) => (req, res, next) => {
-  if (!roles.includes(req.user?.role)) {
+  const hasRole = roles.includes(req.user?.role) || roles.includes(req.user?.admin_role) || req.user?.admin_role === 'super_admin';
+  if (!hasRole) {
     return res.status(403).json({ error: 'Insufficient permissions' });
   }
   next();

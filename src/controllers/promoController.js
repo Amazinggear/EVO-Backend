@@ -160,4 +160,14 @@ const updatePromoCode = async (req, res) => {
   }
 };
 
-module.exports = { validatePromo, listPromoCodes, createPromoCode, updatePromoCode };
+const deletePromoCode = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await query('DELETE FROM promo_codes WHERE id = $1', [id]);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to delete promo code' });
+  }
+};
+
+module.exports = { validatePromo, listPromoCodes, createPromoCode, updatePromoCode, deletePromoCode };

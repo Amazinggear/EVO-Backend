@@ -1,92 +1,146 @@
-const Redis = require('ioredis');
+// src/config/redis.js
+// ══════════════════════════════════════════════════════════════════════════════
+// EVO Redis Client — Smart Fallback
+// In development: uses in-memory store (no Redis server needed)
+// In production:  uses Upstash Redis (free tier, serverless)
+// ══════════════════════════════════════════════════════════════════════════════
+
 const logger = require('../utils/logger');
 
-let redisClient;
-let redisSub;
-let redisPub;
+// ── In-Memory Fallback Store ─────────────────────────────────────────────────
+const _store = new Map();
+const _subscribers = new Map(); // channel → Set of callbacks
+let _usingMock = false;
 
-const createRedisClient = (name = 'default') => {
-  const client = new Redis(process.env.REDIS_URL, {
-    retryStrategy: (times) => {
-      const delay = Math.min(times * 50, 2000);
-      logger.warn(`Redis (${name}) reconnecting in ${delay}ms...`);
-      return delay;
-    },
-    maxRetriesPerRequest: 3,
-  });
+// ── Try to connect to real Redis (Upstash or local) ──────────────────────────
+let redisClient = null;
+let redisSub = null;
 
-  client.on('connect', () => logger.info(`🔴 Redis (${name}) connected`));
-  client.on('error', (err) => logger.error(`Redis (${name}) error:`, err.message));
+const connectRedis = async () => {
+  const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL;
+  
+  if (!redisUrl || redisUrl.includes('your-redis')) {
+    _usingMock = true;
+    logger.warn('⚡ Redis: No URL configured — using in-memory store (dev mode)');
+    logger.warn('   Set REDIS_URL in .env for production (Upstash free tier recommended)');
+    return;
+  }
 
-  return client;
+  try {
+    const { createClient } = require('redis');
+    redisClient = createClient({ url: redisUrl });
+    redisSub = redisClient.duplicate();
+
+    await redisClient.connect();
+    await redisSub.connect();
+    
+    logger.info('✅ Redis connected: ' + redisUrl.substring(0, 30) + '...');
+  } catch (err) {
+    _usingMock = true;
+    logger.warn(`⚡ Redis connect failed (${err.message}) — using in-memory fallback`);
+  }
 };
 
-const getRedis = () => {
-  if (!redisClient) redisClient = createRedisClient('main');
-  return redisClient;
+// ── Set driver location (lat, lng, heading) ───────────────────────────────────
+const setDriverLocation = async (driverId, lat, lng, heading = 0) => {
+  const key = `driver:${driverId}:location`;
+  const value = JSON.stringify({ lat, lng, heading, ts: Date.now() });
+  
+  if (_usingMock) {
+    _store.set(key, value);
+    return;
+  }
+  await redisClient.setEx(key, 300, value); // TTL: 5 minutes
 };
 
-// Dedicated Pub/Sub clients (cannot be used for other commands)
-const getRedisSub = () => {
-  if (!redisSub) redisSub = createRedisClient('sub');
-  return redisSub;
-};
-
-const getRedisPub = () => {
-  if (!redisPub) redisPub = createRedisClient('pub');
-  return redisPub;
-};
-
-// Driver location cache helpers
-const DRIVER_LOCATION_TTL = 120; // 2 minutes
-
-const setDriverLocation = async (driverId, locationData) => {
-  const redis = getRedis();
-  await redis.setex(
-    `driver:location:${driverId}`,
-    DRIVER_LOCATION_TTL,
-    JSON.stringify(locationData)
-  );
-};
-
+// ── Get driver location ───────────────────────────────────────────────────────
 const getDriverLocation = async (driverId) => {
-  const redis = getRedis();
-  const data = await redis.get(`driver:location:${driverId}`);
-  return data ? JSON.parse(data) : null;
+  const key = `driver:${driverId}:location`;
+  
+  if (_usingMock) {
+    const val = _store.get(key);
+    return val ? JSON.parse(val) : null;
+  }
+  const val = await redisClient.get(key);
+  return val ? JSON.parse(val) : null;
 };
 
+// ── Mark driver as online/offline ─────────────────────────────────────────────
 const setDriverOnline = async (driverId, carType) => {
-  const redis = getRedis();
-  await redis.sadd('drivers:online', driverId);
-  await redis.setex(`driver:online:${driverId}`, DRIVER_LOCATION_TTL, carType);
+  const key = `driver:${driverId}:online`;
+  const value = JSON.stringify({ carType, since: Date.now() });
+  
+  if (_usingMock) { _store.set(key, value); return; }
+  await redisClient.setEx(key, 3600, value);
 };
 
 const setDriverOffline = async (driverId) => {
-  const redis = getRedis();
-  await redis.srem('drivers:online', driverId);
-  await redis.del(`driver:online:${driverId}`);
-  await redis.del(`driver:location:${driverId}`);
+  const key = `driver:${driverId}:online`;
+  if (_usingMock) { _store.delete(key); return; }
+  await redisClient.del(key);
 };
 
+// ── Get all online driver IDs ────────────────────────────────────────────────
 const getOnlineDrivers = async () => {
-  const redis = getRedis();
-  return redis.smembers('drivers:online');
+  if (_usingMock) {
+    const onlineIds = [];
+    for (const key of _store.keys()) {
+      if (key.startsWith('driver:') && key.endsWith(':online')) {
+        const parts = key.split(':');
+        onlineIds.push(parts[1]);
+      }
+    }
+    return onlineIds;
+  }
+  
+  // For real Redis
+  try {
+    const keys = await redisClient.keys('driver:*:online');
+    return keys.map(k => k.split(':')[1]);
+  } catch (err) {
+    logger.error('Redis getOnlineDrivers error:', err.message);
+    return [];
+  }
 };
 
-// Publish real-time driver location to ride channel
-const publishDriverLocation = async (rideId, locationData) => {
-  const pub = getRedisPub();
-  await pub.publish(`ride:${rideId}:location`, JSON.stringify(locationData));
+// ── Publish driver location update to ride subscribers ────────────────────────
+const publishDriverLocation = async (channel, data) => {
+  if (_usingMock) {
+    // In-memory pub/sub
+    const subs = _subscribers.get(channel);
+    if (subs) {
+      subs.forEach(cb => cb(JSON.stringify(data)));
+    }
+    return;
+  }
+  await redisClient.publish(channel, JSON.stringify(data));
+};
+
+// ── Get Redis sub client (for Socket.io subscriptions) ────────────────────────
+const getRedisSub = () => {
+  if (_usingMock) {
+    // Return a mock sub object
+    return {
+      subscribe: (channel, callback) => {
+        if (!_subscribers.has(channel)) _subscribers.set(channel, new Set());
+        _subscribers.get(channel).add(callback);
+      },
+      unsubscribe: (channel, callback) => {
+        const subs = _subscribers.get(channel);
+        if (subs) subs.delete(callback);
+      },
+    };
+  }
+  return redisSub;
 };
 
 module.exports = {
-  getRedis,
-  getRedisSub,
-  getRedisPub,
+  connectRedis,
   setDriverLocation,
   getDriverLocation,
   setDriverOnline,
   setDriverOffline,
   getOnlineDrivers,
   publishDriverLocation,
+  getRedisSub,
 };

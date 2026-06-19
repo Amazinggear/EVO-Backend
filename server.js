@@ -12,6 +12,7 @@ const routes = require('./src/routes/index');
 const { initSocket } = require('./src/socket/socketEngine');
 const { setIo } = require('./src/controllers/rideController');
 const { initFirebase } = require('./src/config/firebase');
+const { connectRedis } = require('./src/config/redis');
 const { pool } = require('./src/config/database');
 
 // ────────────────────────────────────────────
@@ -110,6 +111,9 @@ const startServer = async () => {
     // Initialize Firebase Admin
     initFirebase();
 
+    // Initialize Redis (in-memory fallback if no REDIS_URL)
+    await connectRedis();
+
     // Initialize Socket.io engine
     initSocket(io);
 
@@ -143,6 +147,11 @@ const shutdown = async (signal) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+} else {
+  // Initialization for serverless
+  initFirebase();
+}
 
 module.exports = { app, server, io };
