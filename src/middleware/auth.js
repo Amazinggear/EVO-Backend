@@ -14,7 +14,8 @@ const authenticate = async (req, res, next) => {
     }
 
     const token = authHeader.split(' ')[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const jwtSecret = process.env.JWT_SECRET || 'evo-jwt-secret-145555-594162-change-in-production';
+    const decoded = jwt.verify(token, jwtSecret);
 
     // Fetch fresh user from DB on each request (catches suspended accounts)
     const { rows } = await query(
@@ -82,7 +83,8 @@ const requireApprovedDriver = async (req, res, next) => {
  * Generate JWT tokens
  */
 const generateTokens = (userId, role) => {
-  const accessToken = jwt.sign({ userId, role }, process.env.JWT_SECRET, {
+  const jwtSecret = process.env.JWT_SECRET || 'evo-jwt-secret-145555-594162-change-in-production';
+  const accessToken = jwt.sign({ userId, role }, jwtSecret, {
     expiresIn: '7d',
   });
   const refreshToken = jwt.sign({ userId, type: 'refresh' }, process.env.JWT_REFRESH_SECRET, {
